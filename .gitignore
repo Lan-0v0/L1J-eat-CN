@@ -1,0 +1,26 @@
+# ---- L1J-eat-CN ----
+# 纯工具，只放脚本与资源；缓存与本地覆盖配置不入库
+
+# ===== Python 缓存 =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# ===== 本地覆盖配置（可能含个人绝对路径）=====
+config.local.json
+
+# ===== 备份 / 临时 =====
+*.bak
+*.orig
+*.tmp
+*.log
+_bak_*/
+
+# ===== 系统垃圾 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
