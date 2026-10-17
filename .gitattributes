@@ -1,0 +1,13 @@
+# 关闭所有换行符转换 —— 游戏数据文件必须逐字节一致
+* -text
+
+# 明确标记为二进制
+*.jar   binary
+*.gif   binary
+*.png   binary
+*.pak   binary
+*.idx   binary
+
+# 语言统计
+*.java  linguist-language=Java
+*.sql   linguist-language=SQL
