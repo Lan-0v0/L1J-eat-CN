@@ -31,6 +31,7 @@ import argparse
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "lib"))
 import paktools as P  # noqa: E402
+import pakcore as PC  # noqa: E402
 
 DEFAULT_CLIENT = r"D:\Game\天堂\L1J-CN\龙潭天堂"
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -144,91 +145,96 @@ def cmd_export(args):
     print(f"导出完成：{cnt} 个文件 → {os.path.abspath(outdir)}")
 
 
-def build_text(client, patchdir, dry_run=False):
-    pak_path, idx_path, n, recs, pak = load_text(client)
-    names_in_order = [r[1] for r in recs]
-
-    # 收集补丁文件（按条目名匹配，去重）
+def build_text(client, patchdir, dry_run=False, strategy="auto"):
+    """把补丁目录里的同名文件写进容器。
+    策略 auto：长度相同 → 原地写（idx 不动）；长度不同 → 尾部追加 + 改 1 条 idx 记录
+    """
+    c = PC.Container(client)
     wanted = {}
     for f in os.listdir(patchdir):
-        p = os.path.join(patchdir, f)
-        if os.path.isfile(p):
-            wanted[f] = p
-    unknown = [k for k in wanted if k not in names_in_order]
+        fp = os.path.join(patchdir, f)
+        if os.path.isfile(fp):
+            wanted[f] = fp
+    unknown = [k for k in wanted if k not in c.by_name]
     if unknown:
         print(f"[提醒] 补丁目录里有 {len(unknown)} 个文件不在容器条目中（将忽略）：{unknown[:5]}")
-    hit = [k for k in wanted if k in names_in_order]
+    hit = [k for k in wanted if k in c.by_name]
     if not hit:
         raise SystemExit("补丁目录里没有与容器条目同名的文件，什么都没做。")
-    print(f"将替换 {len(hit)} 个条目：{hit[:6]}{' …' if len(hit) > 6 else ''}")
 
-    # 计算新 pak
-    out = bytearray()
-    newrecs = []
-    changed_bytes = 0
-    for off, name, size in recs:
-        if name in hit:
-            data = open(wanted[name], "rb").read()
-            enc = P.encode(data, 0)
-            changed_bytes += len(data)
-        else:
-            enc = pak[off:off + size]
-        newrecs.append((len(out), name, len(enc)))
-        out += enc
-    print(f"新 pak 预计 {len(out)}B（原 {len(pak)}B，替换内容 {changed_bytes}B）")
+    patches = {k: open(wanted[k], "rb").read() for k in hit}
+    print("将替换 %d 个条目（明文合计 %s）：%s%s"
+          % (len(hit), human(sum(len(v) for v in patches.values())),
+             hit[:6], " …" if len(hit) > 6 else ""))
 
-    # 校验 1：结构
-    mx = max((r[0] + r[2]) for r in newrecs)
-    assert mx == len(out), f"结构校验失败：索引末尾 {mx} != pak {len(out)}"
-    assert len(newrecs) == len(recs), "条目数不一致"
-    assert [r[1] for r in newrecs] == names_in_order, "条目顺序/名称不一致"
+    if not dry_run:
+        bk = do_backup(client, "text")
+        print("已备份原文件 → %s" % bk)
 
-    # 校验 2：替换条目逐字节回读
-    for off, name, size in newrecs:
-        if name in hit:
-            src = open(wanted[name], "rb").read()
-            back = P.decode(bytes(out[off:off + size]), 0)
-            if back != src:
-                raise SystemExit(f"回读校验失败：{name}")
+    rep, _, _ = c.replace(patches, strategy=strategy, dry_run=dry_run, backup=False)
+    for a in rep["inplace"]:
+        print("  [原地写]   %-24s off=%d size=%d" % (a["name"], a["off"], a["size"]))
+    for a in rep["appended"]:
+        print("  [尾部追加] %-24s %dB → %dB  new_off=%d"
+              % (a["name"], a["old_size"], a["new_size"], a["new_off"]))
+    print("pak: %d → %d (Δ%+d)  原有数据改动=%dB  追加=%dB"
+          % (rep["pak_old"], rep["pak_new"], rep["pak_delta"],
+             rep["pak_bytes_changed"], rep.get("pak_bytes_appended", 0)))
+    print("idx: %s" % ("已改（%d 条记录）" % len(rep["appended"]) if rep["idx_changed"] else "未改动"))
+    print("--dry-run：未写盘。" if dry_run else "完成。")
 
-    if dry_run:
-        print("--dry-run：校验全部通过，未写盘。")
-        return
 
-    # 备份
-    bk = do_backup(client, "text")
-    print(f"已备份原文件 → {bk}")
+def cmd_diff(args):
+    """发版侧：比较两个客户端，产出 release（条目文件 + manifest）"""
+    d = PC.diff_clients(args.base, args.target)
+    print("base  : %s" % os.path.abspath(args.base))
+    print("target: %s" % os.path.abspath(args.target))
+    print("变更 %d  新增 %d  删除 %d" % (len(d["changed"]), len(d["added"]), len(d["removed"])))
+    for x in d["changed"]:
+        print("  ~ %-28s %dB" % (x["name"], x["size"]))
+    for x in d["added"]:
+        print("  + %-28s %dB  （不支持新增，仅记录）" % (x["name"], x["size"]))
+    for x in d["removed"]:
+        print("  - %-28s %dB  （不支持删除，仅记录）" % (x["name"], x["size"]))
+    if not d["changed"]:
+        print("没有需要发布的变更。")
+        return 0
+    if args.out:
+        man = PC.export_changes(d, args.out, version=args.version)
+        print("已写出 release → %s    version=%s   条目=%d"
+              % (os.path.abspath(args.out), man["version"], len(man["entries"])))
+        for e in man["entries"]:
+            print("    %-28s %6dB  %s" % (e["name"], e["size"], e["sha256"][:16]))
+    else:
+        print("（未指定 --out，未写出文件）")
+    return 0
 
-    # 写临时文件 → 校验 → 替换
-    tmp_pak = pak_path + ".building"
-    tmp_idx = idx_path + ".building"
-    open(tmp_pak, "wb").write(bytes(out))
-    buf = bytearray(4 + len(newrecs) * 28)
-    struct.pack_into("<I", buf, 0, len(newrecs))
-    for i, (off, name, size) in enumerate(newrecs):
-        s = 4 + i * 28
-        struct.pack_into("<i", buf, s, off)
-        nb = name.encode("utf-8")[:20]
-        buf[s + 4:s + 4 + len(nb)] = nb
-        struct.pack_into("<i", buf, s + 24, size)
-    enc_idx = P.encode(bytes(buf), 4)
-    buf[4:] = enc_idx
-    open(tmp_idx, "wb").write(bytes(buf))
 
-    # 回读临时 idx 自检
-    n2, recs2 = P.parse_text_idx(tmp_idx)
-    if n2 != len(newrecs) or len(recs2) != len(newrecs):
-        os.replace(bk + os.sep + "Text.pak", pak_path)
-        os.replace(bk + os.sep + "Text.idx", idx_path)
-        raise SystemExit("新 idx 自检失败，已自动回滚")
-
-    os.replace(tmp_pak, pak_path)
-    os.replace(tmp_idx, idx_path)
-    print(f"完成：pak={os.path.getsize(pak_path)}B  idx={os.path.getsize(idx_path)}B  条目={len(newrecs)}")
+def cmd_apply(args):
+    """客户端侧：读 release 的 manifest，校验后合并"""
+    rep = PC.apply_release(args.client, args.release, dry_run=args.dry_run)
+    print("版本: %s" % rep.get("version"))
+    if rep.get("skipped"):
+        print("已是最新，跳过 %d 条：%s" % (len(rep["skipped"]), rep["skipped"][:5]))
+    patched = rep.get("patched") or []
+    if not patched:
+        print("无需更新。")
+        return 0
+    for a in rep.get("inplace", []):
+        print("  [原地写]   %-24s off=%d size=%d" % (a["name"], a["off"], a["size"]))
+    for a in rep.get("appended", []):
+        print("  [尾部追加] %-24s %dB → %dB  new_off=%d"
+              % (a["name"], a["old_size"], a["new_size"], a["new_off"]))
+    print("pak: %d → %d (Δ%+d)  原有数据改动=%dB  追加=%dB"
+          % (rep["pak_old"], rep["pak_new"], rep["pak_delta"],
+             rep["pak_bytes_changed"], rep.get("pak_bytes_appended", 0)))
+    print("idx: %s" % ("已改" if rep["idx_changed"] else "未改动"))
+    print("--dry-run：未写盘。" if args.dry_run else "更新完成。")
+    return 0
 
 
 def cmd_build(args):
-    build_text(args.client, args.patchdir, dry_run=args.dry_run)
+    build_text(args.client, args.patchdir, dry_run=args.dry_run, strategy=args.strategy)
 
 
 def cmd_verify(args):
@@ -320,10 +326,24 @@ def main():
     p.add_argument("--grep")
     p.set_defaults(func=cmd_export)
 
-    p = tsub.add_parser("build", help="把补丁目录里的同名文件吃进容器")
+    p = tsub.add_parser("build", help="把补丁目录里的同名文件吃进容器（原地写/尾部追加）")
     p.add_argument("patchdir")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--strategy", choices=["auto", "inplace"], default="auto",
+                   help="auto=同长原地写/变长尾部追加；inplace=只允许同长度")
     p.set_defaults(func=cmd_build)
+
+    p = tsub.add_parser("diff", help="发版侧：比较两个客户端并产出 release")
+    p.add_argument("--base", required=True, help="基准客户端目录（线上那一份）")
+    p.add_argument("--target", required=True, help="改过的客户端目录")
+    p.add_argument("--out", help="release 输出目录（manifest.json + text/）")
+    p.add_argument("--version", help="版本号（默认时间戳）")
+    p.set_defaults(func=cmd_diff)
+
+    p = tsub.add_parser("apply", help="客户端侧：按 release 清单合并进容器")
+    p.add_argument("--release", required=True, help="release 目录（含 manifest.json）")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_apply)
 
     p = tsub.add_parser("verify", help="校验配对/完整性")
     p.add_argument("--patchdir")

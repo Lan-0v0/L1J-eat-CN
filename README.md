@@ -53,10 +53,35 @@ python l1eat.py text build work\patch --dry-run
 | `text info` | 条目数、pak 大小、索引末尾与 pak 是否配对、越界条目数 |
 | `text list [--grep X] [--limit N]` | 列出条目（名称/偏移/大小） |
 | `text export <目录> [--grep X]` | 导出条目为明文文件 |
-| `text build <补丁目录> [--dry-run]` | 只替换目录里提供的同名文件，其余原样保留 |
+| `text build <补丁目录> [--dry-run] [--strategy auto\|inplace]` | 把目录里的同名文件写进容器（**原地写 / 尾部追加**，不再紧凑重建） |
+| `text diff --base A --target B [--out release] [--version V]` | **发版侧**：比较两个客户端，产出 `manifest.json` + `text/<条目>` |
+| `text apply --release <目录> [--dry-run]` | **客户端侧**：按清单校验并合并进容器 |
 | `text verify [--patchdir X]` | 校验配对/完整性；给 patchdir 时逐字节比对补丁与容器 |
 | `backup list` | 查看自动备份（保留最近 10 份） |
 | `backup restore <备份名>` | 回滚到指定备份 |
+
+## 写入策略（2026-10-19 重写）
+
+| 策略 | 条件 | pak 变化 | idx 变化 |
+|---|---|---|---|
+| **原地写** | 新长度 == 旧长度 | 只改受影响的 8 字节块 | **0 字节** |
+| **尾部追加** | 长度不同 | 末尾追加，旧数据一字不删 | 改 1 条记录（offset/size） |
+| ~~紧凑重建~~ | — | ~~整个文件重排~~ | **已废弃**（会丢未引用空隙） |
+
+格式依据见 `需求文件工具与产出\客户端容器格式_Text.pak_Text.idx_20261019.md`。
+
+## 发版 → 更新 的标准流程
+
+```bat
+:: 1) 你在开发机上改完内容后，把改过的文件喂进自己的客户端（可选，用于自测）
+l1eat.bat text build work\patch --dry-run
+
+:: 2) 发版：对比"线上版客户端"和"你改过的客户端"，产出 release
+l1eat.bat text diff --base "D:\...\龙潭天堂_线上版" --target "D:\...\龙潭天堂" --out release\v2026101901 --version 2026101901
+
+:: 3) 玩家端：登录器下载 release 后调用
+l1eat.bat text apply --release release\v2026101901
+```
 
 ## 安全机制
 
