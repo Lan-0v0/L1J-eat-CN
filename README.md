@@ -83,6 +83,17 @@ l1eat.bat text diff --base "D:\...\龙潭天堂_线上版" --target "D:\...\龙�
 l1eat.bat text apply --release release\v2026101901
 ```
 
+## Rust 核心 `rust/l1pak`（客户端侧合并用）
+
+同一套算法的 Rust 实现，与 Python 侧**逐字节等价**（`cargo test` 对拍 20 条 golden vectors）。
+
+| 指标 | Python | Rust |
+|---|---|---|
+| 解密吞吐 | ~0.06 MB/s | **~36 MB/s** |
+| 加载 idx（692 KB） | ~11.5 s | **62 ms** |
+
+客户端侧合并必须用 Rust 版（或直接把它编进登录器）。详见 `rust/l1pak/README.md`。
+
 ## 安全机制
 
 1. build 前自动备份到 `backups/<时间戳>_text/`
