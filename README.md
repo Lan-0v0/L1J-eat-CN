@@ -3,7 +3,8 @@
 把散装补丁文件合并进客户端资源容器的工具，用于替代带毒的 `eat.exe`。
 
 - 纯 Python，标准库实现，**无第三方依赖、无网络行为、不执行任何外部程序**
-- 当前支持 **Text.pak / Text.idx**（文字、页面、界面文本）
+- 支持 **Text.pak / Text.idx**（文字、页面、界面文本）：改条目 + **新增条目**
+- 支持 **任意文件通道**：把目录里的文件打进更新清单（反外挂组件、补丁 DLL、配置）
 - 规划：icon → Sprite → Tile → Surf
 
 ## 快速开始
@@ -11,7 +12,10 @@
 ```bat
 l1eat.bat text info          :: 看当前客户端容器概况
 l1eat.bat text verify        :: 校验 idx/pak 配对与完整性
-l1eat.bat text build work\patch   :: 把补丁目录里的同名文件吃进容器
+l1eat.bat text build work\patch   :: 把补丁目录里的文件吃进容器（不存在的按新增处理）
+
+python l1eat.py file pack --src work\antibot --release release\vXXX --prefix antibot
+                            :: 把任意文件打进更新清单（内容按 sha256 存放）
 ```
 
 等价的 Python 调用：
@@ -53,7 +57,9 @@ python l1eat.py text build work\patch --dry-run
 | `text info` | 条目数、pak 大小、索引末尾与 pak 是否配对、越界条目数 |
 | `text list [--grep X] [--limit N]` | 列出条目（名称/偏移/大小） |
 | `text export <目录> [--grep X]` | 导出条目为明文文件 |
-| `text build <补丁目录> [--dry-run] [--strategy auto\|inplace]` | 把目录里的同名文件写进容器（**原地写 / 尾部追加**，不再紧凑重建） |
+| `text build <补丁目录> [--dry-run] [--strategy auto\|inplace]` | 把目录里的文件写进容器：同名=`原地写/尾部追加`，**容器里没有的=新增条目**（idx 按名称小写序插一条） |
+| `file pack --src <目录> --release <目录> [--prefix P] [--exclude X] [--delete P] [--version V] [--dry-run]` | **发版侧**：把任意文件打进清单 `files.entries`，内容复制到 `release/files/<sha256>` |
+| `file list --release <目录>` | 查看清单里的文件通道内容 |
 | `text diff --base A --target B [--out release] [--version V]` | **发版侧**：比较两个客户端，产出 `manifest.json` + `text/<条目>` |
 | `text apply --release <目录> [--dry-run]` | **客户端侧**：按清单校验并合并进容器 |
 | `text verify [--patchdir X]` | 校验配对/完整性；给 patchdir 时逐字节比对补丁与容器 |
@@ -108,7 +114,9 @@ l1eat.bat text apply --release release\v2026101901
 原容器里有 3 处填充间隙（本次 14,057 字节），重建会压缩掉这些无用字节。客户端按索引偏移读取，不受影响；`text verify` 会确认配对正常。
 
 **Q：补丁目录里多放了别的文件会怎样？**
-不在容器条目中的文件会被忽略并提示，不会新增未知条目（避免破坏客户端索引契约）。
+按**新增条目**处理：内容追加到 `Text.pak` 末尾，`Text.idx` 按**名称小写序**插入一条 28B 记录、头部计数 +1。
+必须保持小写序——客户端是二分查找，追加到末尾会查不到（`maker1-h.html file not found` 就是这么来的）。
+若只是普通文件（不是容器条目），请用 `file pack` 走文件通道，不要塞进 Text 补丁目录。
 
 **Q：怎么回滚？**
 `backup list` 找到备份名 → `backup restore <名字>`。
@@ -129,6 +137,8 @@ L1J-eat-CN/
 ## 路线图
 
 - [x] Text.pak / Text.idx 补丁与重建
+- [x] 容器新增条目（idx 按名称小写序插入 + 整段重加密 + 自检）
+- [x] 任意文件通道（`file pack` / `file list`，内容寻址 `files/<sha256>`）
 - [ ] icon 容器（.tbt/.ico）
 - [ ] Sprite.pak 分卷 + idx
 - [ ] Tile.Pak / Surf
