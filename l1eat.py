@@ -156,31 +156,43 @@ def build_text(client, patchdir, dry_run=False, strategy="auto"):
         if os.path.isfile(fp):
             wanted[f] = fp
     unknown = [k for k in wanted if k not in c.by_name]
-    if unknown:
-        print(f"[提醒] 补丁目录里有 {len(unknown)} 个文件不在容器条目中（将忽略）：{unknown[:5]}")
     hit = [k for k in wanted if k in c.by_name]
-    if not hit:
-        raise SystemExit("补丁目录里没有与容器条目同名的文件，什么都没做。")
+    if not hit and not unknown:
+        raise SystemExit("补丁目录里没有文件，什么都没做。")
 
     patches = {k: open(wanted[k], "rb").read() for k in hit}
-    print("将替换 %d 个条目（明文合计 %s）：%s%s"
-          % (len(hit), human(sum(len(v) for v in patches.values())),
-             hit[:6], " …" if len(hit) > 6 else ""))
+    additions = {k: open(wanted[k], "rb").read() for k in unknown}
+    if patches:
+        print("将替换 %d 个条目（明文合计 %s）：%s%s"
+              % (len(patches), human(sum(len(v) for v in patches.values())),
+                 list(patches)[:6], " …" if len(patches) > 6 else ""))
+    if additions:
+        print("将新增 %d 个条目（明文合计 %s）：%s%s"
+              % (len(additions), human(sum(len(v) for v in additions.values())),
+                 list(additions)[:6], " …" if len(additions) > 6 else ""))
 
     if not dry_run:
         bk = do_backup(client, "text")
         print("已备份原文件 → %s" % bk)
 
-    rep, _, _ = c.replace(patches, strategy=strategy, dry_run=dry_run, backup=False)
-    for a in rep["inplace"]:
-        print("  [原地写]   %-24s off=%d size=%d" % (a["name"], a["off"], a["size"]))
-    for a in rep["appended"]:
-        print("  [尾部追加] %-24s %dB → %dB  new_off=%d"
-              % (a["name"], a["old_size"], a["new_size"], a["new_off"]))
-    print("pak: %d → %d (Δ%+d)  原有数据改动=%dB  追加=%dB"
-          % (rep["pak_old"], rep["pak_new"], rep["pak_delta"],
-             rep["pak_bytes_changed"], rep.get("pak_bytes_appended", 0)))
-    print("idx: %s" % ("已改（%d 条记录）" % len(rep["appended"]) if rep["idx_changed"] else "未改动"))
+    if patches:
+        rep, _, _ = c.replace(patches, strategy=strategy, dry_run=dry_run, backup=False)
+        for a in rep["inplace"]:
+            print("  [原地写]   %-24s off=%d size=%d" % (a["name"], a["off"], a["size"]))
+        for a in rep["appended"]:
+            print("  [尾部追加] %-24s %dB → %dB  new_off=%d"
+                  % (a["name"], a["old_size"], a["new_size"], a["new_off"]))
+        print("pak: %d → %d (Δ%+d)  原有数据改动=%dB  追加=%dB"
+              % (rep["pak_old"], rep["pak_new"], rep["pak_delta"],
+                 rep["pak_bytes_changed"], rep.get("pak_bytes_appended", 0)))
+        print("idx: %s" % ("已改（%d 条记录）" % len(rep["appended"]) if rep["idx_changed"] else "未改动"))
+    if additions:
+        rep2, _, _ = c.add(additions, dry_run=dry_run, backup=False)
+        for a in rep2["added"]:
+            print("  [新增条目] %-24s %dB  off=%d" % (a["name"], a["size"], a["off"]))
+        print("pak: %d → %d (Δ%+d)  idx: %dB → %dB（+1 条记录）"
+              % (rep2["pak_old"], rep2["pak_new"], rep2["pak_delta"],
+                 rep2["idx_old_size"], rep2["idx_size"]))
     print("--dry-run：未写盘。" if dry_run else "完成。")
 
 
@@ -193,7 +205,7 @@ def cmd_diff(args):
     for x in d["changed"]:
         print("  ~ %-28s %dB" % (x["name"], x["size"]))
     for x in d["added"]:
-        print("  + %-28s %dB  （不支持新增，仅记录）" % (x["name"], x["size"]))
+        print("  + %-28s %dB  （新增条目，idx +1 条记录）" % (x["name"], x["size"]))
     for x in d["removed"]:
         print("  - %-28s %dB  （不支持删除，仅记录）" % (x["name"], x["size"]))
     if not d["changed"]:

@@ -98,3 +98,49 @@ fn save_and_reload() {
     assert_eq!(reloaded.plain_of("b.html").unwrap(), b"abc".to_vec());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn add_new_entry_grows_idx_by_one_record() {
+    let a = b"<html>orig</html>";
+    let mut c = build_container(&[("a.html", a), ("b.html", b"keep")]);
+    let before_pak = c.pak.clone();
+    let before_idx_len = c.idx_raw.len();
+    let before_count = c.entries.len();
+
+    let mut adds = BTreeMap::new();
+    let page = b"<body>\xe9\x81\x93\xe5\x85\xb7</body>".to_vec();
+    adds.insert("maker1-h.html".to_string(), page.clone());
+
+    let rep = c.add(&adds).expect("add failed");
+    assert_eq!(rep.added.len(), 1, "should report one added entry");
+    assert_eq!(c.entries.len(), before_count + 1, "entry count +1");
+    assert_eq!(c.idx_raw.len(), before_idx_len + 28, "idx grows by one 28B record");
+    let head = u32::from_le_bytes([c.idx_raw[0], c.idx_raw[1], c.idx_raw[2], c.idx_raw[3]]);
+    assert_eq!(head as usize, before_count + 1, "header count +1");
+    assert_eq!(&c.pak[..before_pak.len()], &before_pak[..], "existing pak bytes changed");
+    assert_eq!(c.plain_of("maker1-h.html").unwrap(), page, "readback mismatch");
+    assert_eq!(c.plain_of("a.html").unwrap(), a.to_vec(), "old entry unreadable");
+    assert_eq!(c.plain_of("b.html").unwrap(), b"keep".to_vec());
+
+    let dir = std::env::temp_dir().join("l1pak_test_add");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    c.save(&dir).unwrap();
+    let reloaded = Container::load(&dir).unwrap();
+    assert_eq!(reloaded.entries.len(), before_count + 1);
+    assert_eq!(reloaded.plain_of("maker1-h.html").unwrap(), page);
+    assert_eq!(reloaded.plain_of("a.html").unwrap(), a.to_vec());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn add_rejects_existing_or_toolong_name() {
+    let mut c = build_container(&[("a.html", b"x")]);
+    let mut dup = BTreeMap::new();
+    dup.insert("a.html".to_string(), b"y".to_vec());
+    assert!(c.add(&dup).is_err(), "existing name must be rejected");
+
+    let mut long = BTreeMap::new();
+    long.insert("012345678901234567890.html".to_string(), b"z".to_vec());
+    assert!(c.add(&long).is_err(), "name longer than 20 bytes must be rejected");
+}

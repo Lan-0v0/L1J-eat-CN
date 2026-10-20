@@ -27,3 +27,6 @@ desktop.ini
 
 # ===== Rust 构建产物 =====
 target/
+
+# l1eat text build 自动备份
+backups/

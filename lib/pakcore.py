@@ -261,6 +261,98 @@ class Container(object):
         return report, bytes(pak), idx_out
 
 
+    # ---------- 新增条目 ----------
+    def add(self, additions, dry_run=False, backup=True):
+        """
+        additions: {条目名: 明文 bytes}，只允许**不存在**的条目。
+
+        pak 末尾追加数据；idx 尾部追加 28B 记录，并把头部记录数 +1。
+        idx 正文变长 28 字节后不再是 8 的整数倍，因此必须**整段重新加密**
+        （paktools.encode 对末尾余数原样保留，与原始 idx 写法一致）。
+        写盘前用 _decode_idx 重新解析自检。
+        """
+        if not additions:
+            return {"added": [], "written": False, "pak_old": len(self.pak),
+                    "pak_new": len(self.pak), "pak_delta": 0,
+                    "idx_size": len(self.idx_raw), "idx_changed": False}, None, None
+        for name in additions:
+            if name in self.by_name:
+                raise SystemExit("条目已存在，不能新增：%s" % name)
+            nb = name.encode("utf-8")
+            if not (1 <= len(nb) <= NAME_LEN):
+                raise SystemExit("条目名长度必须 1..=%d 字节：%s" % (NAME_LEN, name))
+            if b"\0" in nb:
+                raise SystemExit("条目名不能含 0 字节：%s" % name)
+
+        pak = bytearray(self.pak)
+        body = bytearray(self.body)
+        added = []
+        for name, data in additions.items():
+            enc = P.encode(data, 0)
+            newoff = len(pak)
+            pak += enc
+            rec = bytearray(REC_SIZE)
+            struct.pack_into("<i", rec, 0, newoff)
+            nb = name.encode("utf-8")
+            rec[4:4 + len(nb)] = nb
+            struct.pack_into("<i", rec, 24, len(enc))
+            body += rec
+            added.append({"name": name, "size": len(enc), "off": newoff})
+
+        n_new = len(self.recs) + len(additions)
+        idx_out = bytearray(4 + len(body))
+        struct.pack_into("<I", idx_out, 0, n_new)
+        idx_out[4:] = P.encode(bytes(body), 0)
+        idx_out = bytes(idx_out)
+
+        # ---- 自检：重新解析 + 逐条回读 ----
+        n_chk, body_chk = _decode_idx(idx_out)
+        if n_chk != n_new or len(body_chk) != n_new * REC_SIZE:
+            raise SystemExit("自检失败：新 idx 结构不符（n=%d）" % n_chk)
+        for a in added:
+            back = P.decode(bytes(pak[a["off"]:a["off"] + a["size"]]), 0)
+            if back != additions[a["name"]]:
+                raise SystemExit("自检失败：新增条目回读不一致 %s" % a["name"])
+
+        report = {
+            "added": added,
+            "pak_old": len(self.pak),
+            "pak_new": len(pak),
+            "pak_delta": len(pak) - len(self.pak),
+            "idx_size": len(idx_out),
+            "idx_old_size": len(self.idx_raw),
+            "idx_changed": True,
+        }
+        if dry_run:
+            report["written"] = False
+            return report, None, None
+
+        if backup:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            bk = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backups",
+                              "%s_text" % stamp)
+            bk = os.path.abspath(bk)
+            os.makedirs(bk, exist_ok=True)
+            shutil.copy2(self.pak_path, os.path.join(bk, "Text.pak"))
+            shutil.copy2(self.idx_path, os.path.join(bk, "Text.idx"))
+            report["backup"] = bk
+
+        tmp_pak = self.pak_path + ".tmp_new"
+        tmp_idx = self.idx_path + ".tmp_new"
+        open(tmp_pak, "wb").write(bytes(pak))
+        open(tmp_idx, "wb").write(idx_out)
+        os.replace(tmp_pak, self.pak_path)
+        os.replace(tmp_idx, self.idx_path)
+        report["written"] = True
+
+        self.pak = bytes(pak)
+        self.idx_raw = idx_out
+        self.body = body
+        self.recs = _parse_recs(body)
+        self.by_name = {r["name"]: r for r in self.recs}
+        return report, bytes(pak), idx_out
+
+
 # ---------- 发版侧 ----------
 def diff_clients(base_dir, target_dir):
     """比较两个客户端目录的 Text 容器，返回变更清单（不落盘）"""
@@ -292,6 +384,14 @@ def export_changes(d, out_dir, version=None):
         os.makedirs(os.path.dirname(path) or os.path.join(out_dir, "text"), exist_ok=True)
         open(path, "wb").write(plain)
         entries.append({"name": name, "size": len(plain), "sha256": sha256(plain)})
+    # 新增条目：客户端容器里原本没有，合并时走 add 分支（idx 加记录）
+    for item in d["added"]:
+        name = item["name"]
+        plain = b.plain(name)
+        path = os.path.join(out_dir, "text", name.replace("\\", "/"))
+        os.makedirs(os.path.dirname(path) or os.path.join(out_dir, "text"), exist_ok=True)
+        open(path, "wb").write(plain)
+        entries.append({"name": name, "size": len(plain), "sha256": sha256(plain), "op": "add"})
     manifest = {
         "schema": 1,
         "container": "Text",
@@ -299,7 +399,7 @@ def export_changes(d, out_dir, version=None):
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "entries": entries,
         "unsupported": {
-            "added": [x["name"] for x in d["added"]],
+            "added": [],
             "removed": [x["name"] for x in d["removed"]],
         },
     }
@@ -319,36 +419,56 @@ def apply_release(client_dir, release_dir, dry_run=False):
     c = Container(client_dir)
 
     patches = {}
+    additions = {}
     skipped = []
     for e in manifest.get("entries", []):
         name, size, h = e["name"], e["size"], e["sha256"]
+        op = (e.get("op") or "replace").lower()
         p = os.path.join(release_dir, "text", name.replace("\\", "/"))
         if not os.path.isfile(p):
             raise SystemExit("清单里的条目文件缺失：%s" % name)
         data = open(p, "rb").read()
         if len(data) != size or sha256(data) != h:
             raise SystemExit("条目校验失败（大小/哈希不符）：%s" % name)
-        if name not in c.by_name:
-            raise SystemExit("客户端容器里没有该条目（不支持新增）：%s" % name)
+        exists = name in c.by_name
+        if op == "add":
+            if exists:
+                # 幂等：重跑时条目已在，内容一致就跳过，不一致按替换处理
+                if sha256(c.plain(name)) == h:
+                    skipped.append(name)
+                else:
+                    patches[name] = data
+            else:
+                additions[name] = data
+            continue
+        if not exists:
+            raise SystemExit("客户端容器里没有该条目（清单未标记 add）：%s" % name)
         if sha256(c.plain(name)) == h:
             skipped.append(name)
             continue
         patches[name] = data
 
-    if not patches:
+    if not patches and not additions:
         return {"version": manifest.get("version"), "skipped": skipped,
-                "patched": [], "written": False}
+                "patched": [], "added": [], "written": False}
 
-    report, _, _ = c.replace(patches, strategy="auto", dry_run=dry_run)
-    report["version"] = manifest.get("version")
-    report["skipped"] = skipped
+    report = {"version": manifest.get("version"), "skipped": skipped,
+              "patched": list(patches), "added": list(additions)}
+    if patches:
+        rep, _, _ = c.replace(patches, strategy="auto", dry_run=dry_run)
+        report.update(rep)
+    if additions:
+        rep2, _, _ = c.add(additions, dry_run=dry_run)
+        report["added_report"] = rep2
+        report["written"] = rep2.get("written", False)
     report["patched"] = list(patches)
+    report["added"] = list(additions)
 
     if not dry_run:
         import json as _json
         stamp = {"version": manifest.get("version"),
                  "applied_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                 "entries": list(patches)}
+                 "entries": list(patches) + list(additions)}
         open(os.path.join(client_dir, "L1J_Update.json"), "w", encoding="utf-8").write(
             _json.dumps(stamp, ensure_ascii=False, indent=2))
     return report
