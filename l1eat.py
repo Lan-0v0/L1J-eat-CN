@@ -229,7 +229,8 @@ def cmd_apply(args):
     if rep.get("skipped"):
         print("已是最新，跳过 %d 条：%s" % (len(rep["skipped"]), rep["skipped"][:5]))
     patched = rep.get("patched") or []
-    if not patched:
+    added = rep.get("added") or []
+    if not patched and not added:
         print("无需更新。")
         return 0
     for a in rep.get("inplace", []):
@@ -237,10 +238,20 @@ def cmd_apply(args):
     for a in rep.get("appended", []):
         print("  [尾部追加] %-24s %dB → %dB  new_off=%d"
               % (a["name"], a["old_size"], a["new_size"], a["new_off"]))
-    print("pak: %d → %d (Δ%+d)  原有数据改动=%dB  追加=%dB"
-          % (rep["pak_old"], rep["pak_new"], rep["pak_delta"],
-             rep["pak_bytes_changed"], rep.get("pak_bytes_appended", 0)))
-    print("idx: %s" % ("已改" if rep["idx_changed"] else "未改动"))
+    if patched:
+        print("pak: %d → %d (Δ%+d)  原有数据改动=%dB  追加=%dB"
+              % (rep["pak_old"], rep["pak_new"], rep["pak_delta"],
+                 rep["pak_bytes_changed"], rep.get("pak_bytes_appended", 0)))
+        print("idx: %s" % ("已改" if rep["idx_changed"] else "未改动"))
+    ar = rep.get("added_report") or {}
+    if ar.get("added"):
+        for a in ar["added"]:
+            print("  [新增条目] %-24s %dB  off=%d" % (a["name"], a["size"], a["off"]))
+        idx_new = ar["idx_size"]
+        idx_old = idx_new - PC.REC_SIZE * len(ar["added"])
+        print("pak: %d → %d (Δ%+d)  idx: %dB → %dB（+%d 条记录）"
+              % (ar["pak_old"], ar["pak_new"], ar["pak_delta"],
+                 idx_old, idx_new, len(ar["added"])))
     print("--dry-run：未写盘。" if args.dry_run else "更新完成。")
     return 0
 
