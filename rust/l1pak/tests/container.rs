@@ -110,13 +110,18 @@ fn add_new_entry_grows_idx_by_one_record() {
     let mut adds = BTreeMap::new();
     let page = b"<body>\xe9\x81\x93\xe5\x85\xb7</body>".to_vec();
     adds.insert("maker1-h.html".to_string(), page.clone());
+    // 插到中间的名字，用来验证“按名称小写序插入”而不是追加到末尾
+    adds.insert("a2.html".to_string(), b"mid".to_vec());
 
     let rep = c.add(&adds).expect("add failed");
-    assert_eq!(rep.added.len(), 1, "should report one added entry");
-    assert_eq!(c.entries.len(), before_count + 1, "entry count +1");
-    assert_eq!(c.idx_raw.len(), before_idx_len + 28, "idx grows by one 28B record");
+    assert_eq!(rep.added.len(), 2, "should report two added entries");
+    assert_eq!(c.entries.len(), before_count + 2, "entry count +2");
+    // 小写序：a.html < a2.html < b.html < maker1-h.html
+    let names: Vec<&str> = c.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["a.html", "a2.html", "b.html", "maker1-h.html"], "idx 未按名称小写序插入");
+    assert_eq!(c.idx_raw.len(), before_idx_len + 56, "idx grows by two 28B records");
     let head = u32::from_le_bytes([c.idx_raw[0], c.idx_raw[1], c.idx_raw[2], c.idx_raw[3]]);
-    assert_eq!(head as usize, before_count + 1, "header count +1");
+    assert_eq!(head as usize, before_count + 2, "header count +2");
     assert_eq!(&c.pak[..before_pak.len()], &before_pak[..], "existing pak bytes changed");
     assert_eq!(c.plain_of("maker1-h.html").unwrap(), page, "readback mismatch");
     assert_eq!(c.plain_of("a.html").unwrap(), a.to_vec(), "old entry unreadable");
@@ -127,7 +132,7 @@ fn add_new_entry_grows_idx_by_one_record() {
     std::fs::create_dir_all(&dir).unwrap();
     c.save(&dir).unwrap();
     let reloaded = Container::load(&dir).unwrap();
-    assert_eq!(reloaded.entries.len(), before_count + 1);
+    assert_eq!(reloaded.entries.len(), before_count + 2);
     assert_eq!(reloaded.plain_of("maker1-h.html").unwrap(), page);
     assert_eq!(reloaded.plain_of("a.html").unwrap(), a.to_vec());
     let _ = std::fs::remove_dir_all(&dir);

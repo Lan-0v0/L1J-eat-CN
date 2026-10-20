@@ -287,16 +287,23 @@ class Container(object):
         pak = bytearray(self.pak)
         body = bytearray(self.body)
         added = []
-        for name, data in additions.items():
+        # ★idx 必须保持“按名称小写序”——客户端用二分查找，追加到末尾会直接查不到。
+        # 新记录插到“第一个小写序比它大的记录”之前，现有记录相对顺序不动。
+        order = [r["name"] for r in self.recs]
+        key = lambda s: s.lower().encode("latin1", "replace")
+        for name in sorted(additions, key=key):
+            data = additions[name]
             enc = P.encode(data, 0)
             newoff = len(pak)
             pak += enc
             rec = bytearray(REC_SIZE)
             struct.pack_into("<i", rec, 0, newoff)
-            nb = name.encode("utf-8")
+            nb = name.encode("latin1")
             rec[4:4 + len(nb)] = nb
             struct.pack_into("<i", rec, 24, len(enc))
-            body += rec
+            pos = next((i for i, n in enumerate(order) if key(n) > key(name)), len(order))
+            body[pos * REC_SIZE:pos * REC_SIZE] = rec
+            order.insert(pos, name)
             added.append({"name": name, "size": len(enc), "off": newoff})
 
         n_new = len(self.recs) + len(additions)
