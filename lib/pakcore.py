@@ -479,3 +479,121 @@ def apply_release(client_dir, release_dir, dry_run=False):
         open(os.path.join(client_dir, "L1J_Update.json"), "w", encoding="utf-8").write(
             _json.dumps(stamp, ensure_ascii=False, indent=2))
     return report
+
+
+# ---------- 普通文件通道（任意文件热更：反外挂组件 / 补丁 DLL / 配置等） ----------
+# 与 Text 通道并列：清单里 files.entries 用相对路径，内容按 sha256 寻址存放，
+# 下载地址 = <update_base><files.base><sha256>。客户端写入前会做路径白名单校验、
+# 占用检测、旧文件备份（backup_l1j/files/<version>/）与原子替换。
+
+FILE_SKIP_DIRS = {".git", "__pycache__", "backup_l1j", ".svn"}
+FILE_DEFAULT_EXCLUDES = ["*.log", "thumbs.db", "desktop.ini", ".ds_store", "*.tmp", "*.l1jtmp"]
+
+
+def sha256_file(path, chunk=1 << 20):
+    """流式计算 (大小, sha256)，大文件也不吃内存"""
+    h = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                break
+            h.update(b)
+            size += len(b)
+    return size, h.hexdigest()
+
+
+def walk_files(src_root, prefix="", exclude=None):
+    """遍历目录，返回 [(清单路径, 绝对路径, 大小, sha256)]，路径统一正斜杠"""
+    import fnmatch
+    excludes = list(FILE_DEFAULT_EXCLUDES) + list(exclude or [])
+    out = []
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        dirnames[:] = sorted(d for d in dirnames if d not in FILE_SKIP_DIRS)
+        for fn in sorted(filenames):
+            abs_p = os.path.join(dirpath, fn)
+            rel = os.path.relpath(abs_p, src_root).replace("\\", "/")
+            if any(fnmatch.fnmatch(rel.lower(), p.lower()) or
+                   fnmatch.fnmatch(fn.lower(), p.lower()) for p in excludes):
+                continue
+            name = (prefix.rstrip("/") + "/" + rel) if prefix else rel
+            size, digest = sha256_file(abs_p)
+            out.append((name, abs_p, size, digest))
+    return out
+
+
+def _load_or_init_manifest(release_dir, version=None):
+    import json
+    mp = os.path.join(release_dir, "manifest.json")
+    if os.path.isfile(mp):
+        m = json.load(open(mp, encoding="utf-8"))
+    else:
+        m = {
+            "schema": 2,
+            "container": "Text",
+            "version": version or time.strftime("%Y%m%d%H%M"),
+            "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "entries": [],
+            "unsupported": {"added": [], "removed": []},
+        }
+    m.setdefault("entries", [])
+    m.setdefault("unsupported", {"added": [], "removed": []})
+    f = m.setdefault("files", {})
+    f.setdefault("base", "files/")
+    f.setdefault("entries", [])
+    f.setdefault("deletes", [])
+    m["schema"] = max(int(m.get("schema") or 1), 2)
+    if version:
+        m["version"] = version
+    return m, mp
+
+
+def pack_files(release_dir, src_root, prefix="", exclude=None, deletes=None,
+               version=None, dry_run=False):
+    """
+    把 src_root 下的文件打进 release 的文件通道：
+      - 内容按 sha256 存到 <release>/files/<sha256>
+      - 清单 files.entries 同路径去重后覆盖
+      - deletes 累加（去重）
+    返回 (manifest, 统计dict)
+    """
+    import json
+    entries = walk_files(src_root, prefix=prefix, exclude=exclude)
+    m, mp = _load_or_init_manifest(release_dir, version)
+    f = m["files"]
+    by_path = {e["path"]: e for e in f["entries"]}
+    added, updated = [], []
+    for name, abs_p, size, digest in entries:
+        item = {"path": name, "size": size, "sha256": digest}
+        if name in by_path:
+            if by_path[name].get("sha256") != digest:
+                updated.append(name)
+            by_path[name] = item
+        else:
+            added.append(name)
+            by_path[name] = item
+        dest = os.path.join(release_dir, f.get("base", "files/"), digest)
+        if not dry_run:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if not os.path.isfile(dest):
+                shutil.copy2(abs_p, dest)
+    f["entries"] = sorted(by_path.values(), key=lambda x: x["path"])
+    for d in (deletes or []):
+        d = d.replace("\\", "/").lstrip("/")
+        if d and d not in f["deletes"]:
+            f["deletes"].append(d)
+    if not dry_run:
+        open(mp, "w", encoding="utf-8").write(json.dumps(m, ensure_ascii=False, indent=2))
+    return m, {"added": added, "updated": updated, "total": len(f["entries"]),
+               "deletes": len(f["deletes"]), "written": not dry_run}
+
+
+def list_files(release_dir):
+    import json
+    mp = os.path.join(release_dir, "manifest.json")
+    if not os.path.isfile(mp):
+        raise SystemExit("找不到 manifest.json：%s" % mp)
+    m = json.load(open(mp, encoding="utf-8"))
+    f = m.get("files") or {}
+    return m, f

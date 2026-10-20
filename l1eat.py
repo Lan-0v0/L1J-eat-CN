@@ -311,6 +311,38 @@ def cmd_backup(args):
         print(f"已回滚 → {os.path.abspath(args.client)}")
 
 
+def cmd_file_pack(args):
+    """发版侧：把目录里的任意文件打进 release 的文件通道"""
+    m, st = PC.pack_files(args.release, args.src, prefix=args.prefix,
+                          exclude=args.exclude, deletes=args.delete,
+                          version=args.version, dry_run=args.dry_run)
+    print("release : %s" % os.path.abspath(args.release))
+    print("来源    : %s%s" % (os.path.abspath(args.src),
+                              ("  → 前缀 " + args.prefix) if args.prefix else ""))
+    print("文件 %d 个（新增 %d / 更新 %d），删除 %d 项%s"
+          % (st["total"], len(st["added"]), len(st["updated"]), st["deletes"],
+             "（dry-run，未写盘）" if args.dry_run else ""))
+    for e in m["files"]["entries"]:
+        print("  %-44s %10d B  %s" % (e["path"], e["size"], e["sha256"][:12]))
+    for x in m["files"]["deletes"]:
+        print("  - %s" % x)
+    print("清单版本: %s    schema=%s" % (m.get("version"), m.get("schema")))
+    return 0
+
+
+def cmd_file_list(args):
+    """列出 release 的文件通道内容"""
+    m, f = PC.list_files(args.release)
+    print("版本 %s | 文件 %d 个 | 删除 %d 项 | 内容目录 %s"
+          % (m.get("version"), len(f.get("entries", [])),
+             len(f.get("deletes", [])), f.get("base")))
+    for e in f.get("entries", []):
+        print("  %-44s %10d B  %s" % (e["path"], e["size"], e["sha256"][:16]))
+    for x in f.get("deletes", []):
+        print("  - %s" % x)
+    return 0
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         try:
@@ -365,6 +397,23 @@ def main():
     b.add_argument("action", choices=["list", "restore"])
     b.add_argument("name", nargs="?")
     b.set_defaults(func=cmd_backup)
+
+    fl = sub.add_parser("file", help="任意文件通道（反外挂组件 / 补丁 DLL / 配置）")
+    fsub = fl.add_subparsers(dest="action", required=True)
+
+    p = fsub.add_parser("pack", help="把目录下的文件打进 release 的文件通道")
+    p.add_argument("--src", required=True, help="要发布的目录（递归）")
+    p.add_argument("--release", required=True, help="release 目录（含/将生成 manifest.json）")
+    p.add_argument("--prefix", default="", help="写进清单时的前缀目录，如 antibot")
+    p.add_argument("--exclude", action="append", default=[], help="排除通配（可多次）")
+    p.add_argument("--delete", action="append", default=[], help="要从客户端删除的相对路径（可多次）")
+    p.add_argument("--version", help="版本号（默认沿用/时间戳）")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_file_pack)
+
+    p = fsub.add_parser("list", help="列出 release 的文件通道")
+    p.add_argument("--release", required=True)
+    p.set_defaults(func=cmd_file_list)
 
     args = ap.parse_args()
     args.client = load_client(args.client)
